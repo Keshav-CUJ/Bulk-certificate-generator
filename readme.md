@@ -136,12 +136,7 @@ docker compose logs -f
 You can now submit a batch generation task to FastAPI. Use `curl` or tools like Postman:
 
 ```bash
-curl -X 'POST' \
-  'http://localhost:8000/api/v1/certificates/batch' \
-  -H 'accept: application/json' \
-  -H 'Content-Type: multipart/form-data' \
-  -F 'course_name=Advanced FastAPI Mastery' \
-  -F 'file=@input_data_40K.csv'
+curl -X POST "http://127.0.0.1:8000/api/v1/certificates/batch" -F "file=@input_data_40K.csv" -F "course_name=Distributed Systems with Celery"
 
 ```
 
@@ -156,9 +151,7 @@ To monitor the progress of your bulk certificate generation batch, you can use t
 Send a `GET` request using the `batch_id returned when you initially submitted your CSV file`:
 
 ```bash
-curl -X 'GET' \
-  'http://localhost:8000/api/v1/certificates/batch/{batch_id}' \
-  -H 'accept: application/json'
+curl "http://127.0.0.1:8000/api/v1/certificates/status/btc_<your_batch_id_here>"
 
 ```
 
