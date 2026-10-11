@@ -1,3 +1,4 @@
 useful-commands
 __pycache__
 .venv
+.env
