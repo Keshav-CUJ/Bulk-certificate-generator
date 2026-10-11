@@ -1,21 +1,36 @@
 # Bulk Certificate Generator
 
-A production-grade, memory-efficient bulk certificate generation and tracking engine built with **FastAPI**, **Celery**, **PostgreSQL**, **Redis**, and **ReportLab**.
+This is a certificate generator, but you can generate certificates in bulk, you dont have to send query for each certificate, just put the details in the csv and hit the endpoint it will give you all the certificates.
 
-Designed to handle multi-gigabyte CSV uploads and generate thousands of publication-ready PDF certificates in parallel without blocking the main event loop or overloading system memory.
+This implementation is inclined towards scale hence this supports upto 40K certificates (Approx less then 15sec, but depends upon assigned CPU cores), however it was tested for 400K certificates too.
+
+User can test the endpoint with 3 different sizes of input:
+
+1. input_data_4k.csv
+2. input_data_40k.csv
+3. input_data_400k.csv
+
+All these 3 CSVs will be generated after docker compose and then the endpoint can be tested.
+There is a User table in database which gets populated while setup (with username like a1,a2,a3.....), and also corresponding input CSVs get created too.
+CSV contains 80% valid and 20% invalid users, so when the certificates are generated you can see it in status endpoint.  
 
 ---
 
 ## Architecture & Design Patterns
 
-* **Web-Queue-Worker Pattern:** FastAPI acts as a high-speed ingestion and streaming layer, offloading CPU-bound PDF rendering tasks to a distributed **Celery** background worker queue.
-* **Streaming CSV Chunker:** Processes massive CSV files row-by-row using low-overhead streams, preventing out-of-memory (OOM) crashes on large datasets.
-* **Hybrid Async/Sync DB Strategy:**
-* **FastAPI Layer:** Uses asynchronous SQLAlchemy (`asyncpg`) for non-blocking HTTP request handling.
-* **Celery Worker Layer:** Uses synchronous SQLAlchemy sessions initialized safely per worker process via Celery signals (`worker_process_init`), bypassing GIL constraints and event loop clashes.
+* Input CSV is received as a network stream, so if a stream contains 40K rows so all 40K rows will not be in the memory. We use chunking method in which 1000 rows are processed at once and sent to the Redis Queue for workers to pick them up.
+* Fastapi does a validation check for correct CSV headers and then chuck the data in async manner.
+* Redis does not only work as a task queue but it also used as a tracking engine for `total`, `processed`, `success`, `failed` counts so that we dont have to write in the database after each chunk.
+* For this implementation celery workers are setup with concurrency=2 which means 2 CPU cores can do pdf generation task parallely, workers just read the tasks from queue and then generate the pdfs and after a chunk is porcessed, redis counters are incremented and also bulk write up happens in the database which stores generated certificate's info.
+* Bulk write up (For handling write heavy operation), chuck wise processing and Redis counters are the decisions made for scaling up this implementaion.
+* While chuck processing each user is validated aginst the actual information in User table, so if the user is present in the database then only the certificate will be generated. This operation is read-heavy and will be considered in next implementation.
 
+## Test results
 
-* **Real-Time Tracking:** Redis hashes and atomic counters (`hincrby`) track batch processing progress (`total`, `processed`, `success`, `failed`) in real time.
+* 4K test user CSV --> takes ~2sec when concurrency is set to 2
+* 40K test user CSV --> takes ~15sec when concurrency is set to 2
+* 400K test user CSV --> takes ~120sec when concurrency is set to 2
+
 
 ---
 
@@ -27,112 +42,98 @@ Designed to handle multi-gigabyte CSV uploads and generate thousands of publicat
 * **PDF Engine:** ReportLab (Landscape format with custom borders and typography)
 * **Caching & State:** Redis
 
----
 
-## Project Directory Structure
 
-```text
-bulk-certificate/
-├── app/
-│   ├── __init__.py
-│   ├── main.py            # FastAPI entrypoint & streaming batch endpoint
-│   ├── celery_app.py      # Celery application configuration
-│   ├── database.py        # Async engine & session setup for FastAPI
-│   ├── models.py          # SQLAlchemy models (User, CertificateBatch, CertificateItem)
-│   ├── tasks.py           # Synchronous Celery worker tasks & ReportLab PDF generator
-│   └── config.py          # Application configuration & environment settings
-├── media/
-│   └── certificates/      # Generated PDF output storage organized by batch ID
-├── requirements.txt       # Project Python dependencies
-└── README.md
+## Complete Project Setup Guide
 
-```
+### Step 1: Clone the Repository & Setup Environment Files
 
----
-
-## Prerequisites
-
-Make sure you have the following services installed and running locally:
-
-* **Python 3.10+**
-* **PostgreSQL**
-* **Redis Server**
-
----
-
-## Local Setup Instructions
-
-### 1. Clone and Navigate to the Repository
-
+1. Clone your repository and navigate into the project directory:
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/Keshav-CUJ/Bulk-certificate-generator
 cd bulk-certificate
 
 ```
 
-### 2. Create and Activate a Virtual Environment
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-
-```
-
-### 3. Install Dependencies
-
-```bash
-pip install fastapi uvicorn celery redis sqlalchemy asyncpg psycopg2-binary reportlab pydantic-settings
-
-```
-
-### 4. Configure Environment Variables
-
-Create a `.env` file in the root directory:
-
+2. Rename the .env.example to .env ans set variables accordingly
 ```env
-DATABASE_URL=postgresql+asyncpg://postgres:yourpassword@localhost:5432/certificate_db
-REDIS_URL=redis://localhost:6379/0
+POSTGRES_USER=postgres    #You can change this
+POSTGRES_PASSWORD=passwd  #You can change this
+POSTGRES_DB=Certificate   #Please dont change it
+DB_HOST=db                #Keep 'db' for docker setup and 'localhost' for locally setting up
 
 ```
 
 ---
 
-## Running the Application
+### Step 2: Build and Launch the Docker Stack
 
-To run the system locally, you need three separate terminal windows:
-
-### Terminal 1: Start Redis Server
+Ensure Docker and Docker Compose are installed on your machine, then spin up the entire architecture (PostgreSQL, Redis, FastAPI, and Celery workers) in detached mode:
 
 ```bash
-redis-server
+docker compose up --build -d
 
 ```
 
-### Terminal 2: Start Celery Worker
-
-Run the Celery worker with the prefork pool enabled and your desired concurrency level (e.g., matching your CPU core count):
-
-```bash
-celery -A app.tasks.celery_app worker --pool=prefork --concurrency=2 --loglevel=info
-
-```
-
-### Terminal 3: Start FastAPI Server
-
-Start the Uvicorn development server:
-
-```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-```
+* **What happens here:** PostgreSQL starts up, automatically provisions your database using your `.env` variables, Redis initializes, and both FastAPI and Celery build their images and connect to the services.
 
 ---
 
-## API Usage Example
+### Step 3: Seed the Database & Generate Test CSV Files
 
-### Submit a Certificate Batch
+Using the containerized environment, you can generate your test datasets (`4K`, `40K`, or `400K`) directly into PostgreSQL and output the matching CSV files to your host folder.
 
-Send a multi-part form request with a CSV file containing columns `user_id` and `course_name`.
+* **For 4K Dataset (`a-h` prefix, 800 invalid rows):**
+```bash
+docker compose run --rm web python seed_data.py 4k
+
+```
+
+
+* **For 40K Dataset (`i-p` prefix, 8,000 invalid rows):**
+```bash
+docker compose run --rm web python seed_data.py 40k
+
+```
+
+
+* **For 400K Dataset (`q-x` prefix, 80,000 invalid rows):**
+```bash
+docker compose run --rm web python seed_data.py 400k
+
+```
+
+
+
+Once complete, the respective CSV file (e.g., `input_data_40K.csv`) will appear in your project root directory.
+
+---
+
+### Step 4: Verify the Services Are Running
+
+You can check the health and logs of your containers at any time:
+
+* **Check running containers:**
+```bash
+docker compose ps
+
+```
+
+
+* **View live logs:**
+```bash
+docker compose logs -f
+
+```
+
+
+
+---
+
+### Step 5: Test the API Endpoint
+
+You can now submit a batch generation task to FastAPI. Use `curl` or tools like Postman:
 
 ```bash
 curl -X 'POST' \
@@ -140,27 +141,46 @@ curl -X 'POST' \
   -H 'accept: application/json' \
   -H 'Content-Type: multipart/form-data' \
   -F 'course_name=Advanced FastAPI Mastery' \
-  -F 'file=@path/to/your/users.csv'
+  -F 'file=@input_data_40K.csv'
 
 ```
 
-**Successful Response (`202 Accepted`):**
+Generated PDF certificates will be saved securely inside the container and mapped to your local `media/certificates/{batch_id}/` directory.
+
+
+To monitor the progress of your bulk certificate generation batch, you can use the status checking endpoint. This allows you to track metrics like total records, processed count, success count, failed count, and current status (`PROCESSING`, `COMPLETED`, etc.).
+
+
+### Check Status via `curl`
+
+Send a `GET` request using the `batch_id returned when you initially submitted your CSV file`:
+
+```bash
+curl -X 'GET' \
+  'http://localhost:8000/api/v1/certificates/batch/{batch_id}' \
+  -H 'accept: application/json'
+
+```
+
+Replace `{batch_id}` with the actual ID from your database or API response (e.g., `btc_12345`).
+
+---
+
+### Example Response
 
 ```json
 {
-  "status": "ACCEPTED",
-  "message": "Batch uploaded and queued for background processing.",
-  "data": {
-    "batch_id": "btc_a1b2c3d4",
-    "total_records": 1000,
-    "status_url": "/api/v1/certificates/status/btc_a1b2c3d4"
-  }
+  "id": "btc_12345",
+  "course_name": "Advanced FastAPI Mastery",
+  "total_count": 40000,
+  "processed_count": 35000,
+  "success_count": 27000,
+  "failed_count": 8000,
+  "status": "PROCESSING",
+  "created_at": "2026-10-11T22:00:00Z",
+  "completed_at": null
 }
 
 ```
 
----
-
-## Next Steps
-
-* Containerizing the application stack (`Dockerfile` + `docker-compose.yml`) for seamless one-command deployment.
+You can poll this endpoint periodically in a loop or check it manually to watch your Celery background workers process large datasets (like your 40K or 400K records) in parallel!
